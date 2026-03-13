@@ -847,7 +847,7 @@ function render() {
   const data = imgData.data;
 
   for (let screenY = 0; screenY < H - horizonY; screenY++) {
-    const rowFromBottom = (H - horizonY) - screenY;
+    const rowFromBottom = screenY + 1;
     const perspective = rowFromBottom / ROAD_H;
     if (perspective < 0.01) continue;
     const depth = 1.0 / perspective;
@@ -862,9 +862,9 @@ function render() {
       let nearestDist = Infinity;
 
       const searchCenter = ((Math.floor(player.trackPos) % pLen) + pLen) % pLen;
-      const searchR = 50;
+      const searchR = 80;
       const start = searchCenter - searchR;
-      for (let i = start; i < start + searchR * 2; i += 2) {
+      for (let i = start; i < start + searchR * 2; i += 3) {
         const ti = ((i % pLen) + pLen) % pLen;
         const tp = trackPath[ti];
         const dx = worldX - tp.x, dy = worldY - tp.y;
