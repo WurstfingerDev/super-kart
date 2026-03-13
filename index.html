@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Super Kart Racing - SNES Style</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: 'Courier New', monospace; }
+canvas { image-rendering: pixelated; border: 2px solid #333; }
+#ui { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); color: #fff; font-size: 16px; text-align: center; text-shadow: 2px 2px #000; z-index: 10; pointer-events: none; }
+#speed-bar { width: 150px; height: 12px; background: #333; border: 1px solid #666; margin: 4px auto; }
+#speed-fill { height: 100%; background: linear-gradient(90deg, #0f0, #ff0, #f00); width: 0%; transition: width 0.1s; }
+#start-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; justify-content: center; align-items: center; color: #fff; z-index: 20; }
+#start-screen h1 { font-size: 48px; color: #f44; margin-bottom: 10px; text-shadow: 3px 3px #000; }
+#start-screen h2 { font-size: 20px; color: #ff0; margin-bottom: 30px; }
+#start-screen .controls { font-size: 14px; color: #aaa; line-height: 2; }
+#start-screen .blink { animation: blink 1s infinite; font-size: 24px; color: #0f0; margin-top: 30px; }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+#minimap { position: absolute; bottom: 10px; right: 10px; border: 2px solid #666; z-index: 10; }
+#lap-display { font-size: 22px; color: #ff0; }
+#pos-display { font-size: 18px; color: #0ff; }
+#item-box { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); width: 48px; height: 48px; border: 3px solid #fff; background: rgba(0,0,0,0.7); z-index: 10; display: flex; align-items: center; justify-content: center; font-size: 28px; border-radius: 8px; }
+</style>
+</head>
+<body>
+
+<div id="start-screen">
+  <h1>🏎️ SUPER KART</h1>
+  <h2>~ SNES Style Racing ~</h2>
+  <div class="controls">
+    ⬆️ Accelerate &nbsp;|&nbsp; ⬇️ Brake<br>
+    ⬅️ ➡️ Steer &nbsp;|&nbsp; SPACE = Use Item<br>
+    Hop + Direction = Drift!
+  </div>
+  <div class="blink">PRESS ENTER TO START</div>
+</div>
+
+<div id="ui">
+  <div id="lap-display">LAP 1/3</div>
+  <div id="pos-display">POS: 1st</div>
+  <div id="speed-bar"><div id="speed-fill"></div></div>
+</div>
+
+<div id="item-box"></div>
+
+<canvas id="game" width="512" height="448"></canvas>
+<canvas id="minimap" width="120" height="120"></canvas>
+
+<script>
+// ============================================================
+// SUPER KART - SNES Mode 7 Style Racer
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const miniCanvas = document.getElementById('minimap');
+const miniCtx = miniCanvas.getContext('2d');
+
+const W = 512, H = 448;
+const ROAD_H = H * 0.65; // horizon line
+
+// Game state
+let gameState = 'start'; // start, countdown, race, finish
+let countdownTimer = 0;
+let countdownNum = 3;
+
+// Track definition - control points for the circuit
+const trackPoints = [
+  {x: 400, y: 400}, {x: 600, y: 350}, {x: 750, y: 300},
+  {x: 800, y: 200}, {x: 780, y: 100}, {x: 650, y: 50},
+  {x: 500, y: 30},  {x: 350, y: 50},  {x: 200, y: 100},
+  {x: 150, y: 200}, {x: 180, y: 320}, {x: 250, y: 400},
+  {x: 350, y: 420},
+];
+
+// Generate smooth track from control points
+function generateTrack(points, segments) {
+  const track = [];
+  const n = points.length;
+  for (let i = 0; i < segments; i++) {
+    const t = i / segments;
+    const idx = Math.floor(t * n);
+    const lt = (t * n) - idx;
+    const p0 = points[(idx - 1 + n) % n];
+    const p1 = points[idx % n];
+    const p2 = points[(idx + 1) % n];
+    const p3 = points[(idx + 2) % n];
+    // Catmull-Rom
+    const x = 0.5 * ((-p0.x + 3*p1.x - 3*p2.x + p3.x)*lt*lt*lt +
+              (2*p0.x - 5*p1.x + 4*p2.x - p3.x)*lt*lt +
+              (-p0.x + p2.x)*lt + 2*p1.x);
+    const y = 0.5 * ((-p0.y + 3*p1.y - 3*p2.y + p3.y)*lt*lt*lt +
+              (2*p0.y - 5*p1.y + 4*p2.y - p3.y)*lt*lt +
+              (-p0.y + p2.y)*lt + 2*p1.y);
+    track.push({x, y});
+  }
+  return track;
+}
+
+const trackPath = generateTrack(trackPoints, 500);
+const TRACK_WIDTH = 60;
+
+// Colors
+const COL_GRASS1 = '#2d8c2d';
+const COL_GRASS2 = '#248024';
+const COL_ROAD1 = '#888';
+const COL_ROAD2 = '#777';
+const COL_CURB1 = '#f00';
+const COL_CURB2 = '#fff';
+const COL_SKY = '#4488cc';
+const COL_HORIZON = '#88bbee';
+
+// Player
+const player = {
+  trackPos: 0,        // position along track (0 to trackPath.length)
+  lateralOff: 0,      // lateral offset from center (-1 to 1)
+  speed: 0,
+  maxSpeed: 5,
+  accel: 0.08,
+  brake: 0.15,
+  decel: 0.02,        // natural deceleration
+  turnSpeed: 0.03,
+  angle: 0,           // visual angle for drift effect
+  lap: 1,
+  maxLaps: 3,
+  checkpoint: 0,
+  item: null,
+  itemTimer: 0,
+  boostTimer: 0,
+  spinTimer: 0,
+  finished: false,
+  finishTime: 0,
+};
+
+// AI Racers
+const aiColors = ['#f44', '#44f', '#f4f', '#4ff', '#ff4', '#f84', '#4f4'];
+const aiRacers = [];
+for (let i = 0; i < 7; i++) {
+  aiRacers.push({
+    trackPos: -((i+1) * 8),  // staggered start behind player
+    lateralOff: (Math.random() - 0.5) * 0.6,
+    speed: 0,
+    maxSpeed: 3.8 + Math.random() * 1.0,
+    color: aiColors[i],
+    lap: 1,
+    checkpoint: 0,
+    finished: false,
+    wobble: Math.random() * Math.PI * 2,
+    skill: 0.7 + Math.random() * 0.3,
+  });
+}
+
+// Items
+const ITEMS = ['🍌', '🟢', '⭐', '🍄', '❓'];
+const itemBoxPositions = [];
+for (let i = 0; i < 8; i++) {
+  itemBoxPositions.push({
+    trackPos: Math.floor(i * trackPath.length / 8),
+    lateralOff: (Math.random() - 0.5) * 0.5,
+    active: true,
+    respawnTimer: 0,
+  });
+}
+
+// Banana peels on track
+const bananas = [];
+
+// Input
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; e.preventDefault(); });
+window.addEventListener('keyup', e => { keys[e.code] = false; e.preventDefault(); });
+
+// Get track position and direction at a given index
+function getTrackInfo(pos) {
+  const len = trackPath.length;
+  const idx = ((Math.floor(pos) % len) + len) % len;
+  const next = (idx + 1) % len;
+  const p = trackPath[idx];
+  const pn = trackPath[next];
+  const dx = pn.x - p.x;
+  const dy = pn.y - p.y;
+  const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+  return {
+    x: p.x, y: p.y,
+    dirX: dx/dist, dirY: dy/dist,
+    normX: -dy/dist, normY: dx/dist,
+  };
+}
+
+// Get world position for a racer
+function getRacerWorldPos(trackPos, lateralOff) {
+  const info = getTrackInfo(trackPos);
+  return {
+    x: info.x + info.normX * lateralOff * TRACK_WIDTH,
+    y: info.y + info.normY * lateralOff * TRACK_WIDTH,
+  };
+}
+
+// Check if on track
+function isOnTrack(trackPos, lateralOff) {
+  return Math.abs(lateralOff) < 1.0;
+}
+
+// Race timer
+let raceTime = 0;
+let bestLapTime = Infinity;
+let lapStartTime = 0;
+
+// Start
+function startRace() {
+  gameState = 'countdown';
+  countdownTimer = 0;
+  countdownNum = 3;
+  player.trackPos = 0;
+  player.lateralOff = 0;
+  player.speed = 0;
+  player.lap = 1;
+  player.checkpoint = 0;
+  player.item = null;
+  player.finished = false;
+  player.boostTimer = 0;
+  player.spinTimer = 0;
+  raceTime = 0;
+  lapStartTime = 0;
+  bananas.length = 0;
+  
+  aiRacers.forEach((ai, i) => {
+    ai.trackPos = -((i+1) * 8);
+    ai.speed = 0;
+    ai.lap = 1;
+    ai.checkpoint = 0;
+    ai.finished = false;
+  });
+  
+  itemBoxPositions.forEach(ib => { ib.active = true; ib.respawnTimer = 0; });
+  
+  document.getElementById('start-screen').style.display = 'none';
+}
+
+// Update
+function update(dt) {
+  if (gameState === 'start') return;
+  
+  if (gameState === 'countdown') {
+    countdownTimer += dt;
+    if (countdownTimer > 1) {
+      countdownTimer = 0;
+      countdownNum--;
+      if (countdownNum < 0) {
+        gameState = 'race';
+      }
+    }
+    return;
+  }
+  
+  if (gameState === 'race') {
+    raceTime += dt;
+  }
+  
+  // === Player input ===
+  if (player.spinTimer > 0) {
+    player.spinTimer -= dt;
+    player.angle += dt * 10;
+    player.speed *= 0.95;
+  } else if (!player.finished) {
+    // Accelerate / brake
+    if (keys['ArrowUp'] || keys['KeyW']) {
+      const maxSpd = player.boostTimer > 0 ? player.maxSpeed * 1.4 : player.maxSpeed;
+      const onRoad = isOnTrack(player.trackPos, player.lateralOff);
+      const effectiveMax = onRoad ? maxSpd : maxSpd * 0.5;
+      player.speed = Math.min(player.speed + player.accel, effectiveMax);
+    } else if (keys['ArrowDown'] || keys['KeyS']) {
+      player.speed = Math.max(player.speed - player.brake, -1);
+    } else {
+      player.speed *= (1 - player.decel);
+      if (Math.abs(player.speed) < 0.01) player.speed = 0;
+    }
+    
+    // Steer
+    const steerAmount = player.turnSpeed * (1 + (player.speed / player.maxSpeed) * 0.5);
+    if (keys['ArrowLeft'] || keys['KeyA']) {
+      player.lateralOff -= steerAmount;
+      player.angle = Math.max(player.angle - 0.08, -0.4);
+    } else if (keys['ArrowRight'] || keys['KeyD']) {
+      player.lateralOff += steerAmount;
+      player.angle = Math.min(player.angle + 0.08, 0.4);
+    } else {
+      player.angle *= 0.85;
+    }
+    
+    // Use item
+    if (keys['Space'] && player.item) {
+      useItem();
+      keys['Space'] = false;
+    }
+    
+    // Clamp lateral
+    player.lateralOff = Math.max(-1.5, Math.min(1.5, player.lateralOff));
+    
+    // Off-road slowdown
+    if (!isOnTrack(player.trackPos, player.lateralOff)) {
+      player.speed *= 0.97;
+    }
+  }
+  
+  // Move player
+  player.trackPos += player.speed;
+  if (player.boostTimer > 0) player.boostTimer -= dt;
+  
+  // Lap detection for player
+  const pLen = trackPath.length;
+  const halfTrack = pLen / 2;
+  const playerNormPos = ((player.trackPos % pLen) + pLen) % pLen;
+  
+  if (playerNormPos > halfTrack && player.checkpoint === 0) {
+    player.checkpoint = 1;
+  }
+  if (playerNormPos < halfTrack * 0.3 && player.checkpoint === 1) {
+    player.lap++;
+    player.checkpoint = 0;
+    const lapTime = raceTime - lapStartTime;
+    if (lapTime < bestLapTime) bestLapTime = lapTime;
+    lapStartTime = raceTime;
+    
+    if (player.lap > player.maxLaps) {
+      player.finished = true;
+      player.finishTime = raceTime;
+      if (gameState === 'race') {
+        gameState = 'finish';
+      }
+    }
+  }
+  
+  // === AI racers ===
+  aiRacers.forEach(ai => {
+    if (ai.finished) return;
+    
+    // Simple AI: accelerate with wobble
+    ai.wobble += dt * 2;
+    const targetSpeed = ai.maxSpeed * ai.skill;
+    ai.speed += (targetSpeed - ai.speed) * 0.02;
+    ai.lateralOff += Math.sin(ai.wobble) * 0.005;
+    ai.lateralOff = Math.max(-0.8, Math.min(0.8, ai.lateralOff));
+    ai.trackPos += ai.speed;
+    
+    // AI lap detection
+    const aiNormPos = ((ai.trackPos % pLen) + pLen) % pLen;
+    if (aiNormPos > halfTrack && ai.checkpoint === 0) {
+      ai.checkpoint = 1;
+    }
+    if (aiNormPos < halfTrack * 0.3 && ai.checkpoint === 1) {
+      ai.lap++;
+      ai.checkpoint = 0;
+      if (ai.lap > player.maxLaps) {
+        ai.finished = true;
+      }
+    }
+  });
+  
+  // === Item boxes ===
+  itemBoxPositions.forEach(ib => {
+    if (!ib.active) {
+      ib.respawnTimer -= dt;
+      if (ib.respawnTimer <= 0) ib.active = true;
+      return;
+    }
+    
+    const dist = Math.abs(((player.trackPos % pLen) + pLen) % pLen - ib.trackPos);
+    if (dist < 5 && Math.abs(player.lateralOff - ib.lateralOff) < 0.4 && !player.item) {
+      player.item = ITEMS[Math.floor(Math.random() * ITEMS.length)];
+      ib.active = false;
+      ib.respawnTimer = 10;
+    }
+  });
+  
+  // === Banana collision ===
+  bananas.forEach((b, i) => {
+    const dist = Math.abs(((player.trackPos % pLen) + pLen) % pLen - b.trackPos);
+    if (dist < 4 && Math.abs(player.lateralOff - b.lateralOff) < 0.3) {
+      player.spinTimer = 1.0;
+      player.speed *= 0.3;
+      bananas.splice(i, 1);
+    }
+  });
+  
+  // Update UI
+  const lapDisp = Math.min(player.lap, player.maxLaps);
+  document.getElementById('lap-display').textContent = `LAP ${lapDisp}/${player.maxLaps}`;
+  document.getElementById('speed-fill').style.width = `${Math.abs(player.speed) / player.maxSpeed * 100}%`;
+  
+  // Position calculation
+  const positions = getPositions();
+  const playerPos = positions.indexOf('player') + 1;
+  const suffix = ['st','nd','rd','th','th','th','th','th'][playerPos-1];
+  document.getElementById('pos-display').textContent = `POS: ${playerPos}${suffix}`;
+  
+  // Item display
+  document.getElementById('item-box').textContent = player.item || '';
+}
+
+function getPositions() {
+  const pLen = trackPath.length;
+  const racers = [{id: 'player', score: (player.lap-1)*pLen + ((player.trackPos%pLen)+pLen)%pLen}];
+  aiRacers.forEach((ai, i) => {
+    racers.push({id: `ai${i}`, score: (ai.lap-1)*pLen + ((ai.trackPos%pLen)+pLen)%pLen});
+  });
+  racers.sort((a,b) => b.score - a.score);
+  return racers.map(r => r.id);
+}
+
+function useItem() {
+  const item = player.item;
+  player.item = null;
+  
+  switch(item) {
+    case '🍌':
+      bananas.push({
+        trackPos: ((player.trackPos - 10) % trackPath.length + trackPath.length) % trackPath.length,
+        lateralOff: player.lateralOff,
+      });
+      break;
+    case '🟢':
+      // Green shell - boost forward, hit AI
+      player.boostTimer = 0.5;
+      break;
+    case '⭐':
+      // Star - invincibility + speed
+      player.boostTimer = 3;
+      break;
+    case '🍄':
+      // Mushroom - speed boost
+      player.boostTimer = 1.5;
+      player.speed = player.maxSpeed * 1.3;
+      break;
+    case '❓':
+      // Random bonus
+      player.boostTimer = 1;
+      player.speed = Math.max(player.speed, player.maxSpeed * 0.8);
+      break;
+  }
+}
+
+// ============================================================
+// RENDERING - Mode 7 Style
+// ============================================================
+
+function render() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  
+  // Sky gradient
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H - ROAD_H);
+  skyGrad.addColorStop(0, '#2255aa');
+  skyGrad.addColorStop(1, COL_HORIZON);
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, H - ROAD_H);
+  
+  // Draw clouds
+  drawClouds();
+  
+  // Mode 7 ground rendering
+  const pLen = trackPath.length;
+  const playerWorld = getRacerWorldPos(player.trackPos, player.lateralOff);
+  const pInfo = getTrackInfo(player.trackPos);
+  
+  for (let screenY = H - ROAD_H; screenY < H; screenY++) {
+    const rowFromBottom = H - screenY;
+    const perspective = rowFromBottom / ROAD_H;
+    if (perspective < 0.01) continue;
+    
+    const depth = 1.0 / perspective;
+    const scale = depth * 3;
+    
+    for (let screenX = 0; screenX < W; screenX += 2) {
+      // Map screen to world
+      const relX = (screenX - W/2) / W;
+      const worldX = playerWorld.x + pInfo.dirX * depth * 80 + pInfo.normX * relX * scale * 40;
+      const worldY = playerWorld.y + pInfo.dirY * depth * 80 + pInfo.normY * relX * scale * 40;
+      
+      // Check if on track
+      let onTrack = false;
+      let onCurb = false;
+      let nearestDist = Infinity;
+      
+      // Sample nearby track points
+      const searchStart = Math.max(0, Math.floor(((player.trackPos % pLen) + pLen) % pLen) - 60);
+      for (let i = searchStart; i < searchStart + 120; i++) {
+        const ti = ((i % pLen) + pLen) % pLen;
+        const tp = trackPath[ti];
+        const dx = worldX - tp.x;
+        const dy = worldY - tp.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < nearestDist) nearestDist = dist;
+      }
+      
+      if (nearestDist < TRACK_WIDTH) {
+        onTrack = true;
+        if (nearestDist > TRACK_WIDTH - 5) onCurb = true;
+      }
+      
+      // Checkerboard pattern
+      const checker = ((Math.floor(worldX / 20) + Math.floor(worldY / 20)) % 2 === 0);
+      
+      let color;
+      if (onCurb) {
+        color = checker ? COL_CURB1 : COL_CURB2;
+      } else if (onTrack) {
+        color = checker ? COL_ROAD1 : COL_ROAD2;
+      } else {
+        color = checker ? COL_GRASS1 : COL_GRASS2;
+      }
+      
+      ctx.fillStyle = color;
+      ctx.fillRect(screenX, screenY, 2, 1);
+    }
+  }
+  
+  // Draw sprites (item boxes, bananas, AI racers)
+  const sprites = [];
+  
+  // Item boxes
+  itemBoxPositions.forEach(ib => {
+    if (!ib.active) return;
+    const wp = getRacerWorldPos(ib.trackPos, ib.lateralOff);
+    sprites.push({type: 'item', x: wp.x, y: wp.y, trackPos: ib.trackPos});
+  });
+  
+  // Bananas
+  bananas.forEach(b => {
+    const wp = getRacerWorldPos(b.trackPos, b.lateralOff);
+    sprites.push({type: 'banana', x: wp.x, y: wp.y, trackPos: b.trackPos});
+  });
+  
+  // AI racers
+  aiRacers.forEach((ai, i) => {
+    const wp = getRacerWorldPos(ai.trackPos, ai.lateralOff);
+    sprites.push({type: 'kart', x: wp.x, y: wp.y, color: ai.color, trackPos: ai.trackPos});
+  });
+  
+  // Sort by distance and render
+  sprites.forEach(s => {
+    const dx = s.x - playerWorld.x;
+    const dy = s.y - playerWorld.y;
+    s.dist = Math.sqrt(dx*dx + dy*dy);
+    
+    // Project to screen
+    const relDirX = dx * pInfo.dirX + dy * pInfo.dirY;
+    const relDirN = dx * pInfo.normX + dy * pInfo.normY;
+    
+    if (relDirX > 2) {
+      const projScale = 80 / relDirX;
+      s.screenX = W/2 + relDirN * projScale * 3;
+      s.screenY = H - ROAD_H + (ROAD_H * projScale * 0.3);
+      s.size = Math.max(4, 30 * projScale);
+      s.visible = true;
+    } else {
+      s.visible = false;
+    }
+  });
+  
+  sprites.sort((a,b) => b.dist - a.dist);
+  
+  sprites.forEach(s => {
+    if (!s.visible) return;
+    
+    if (s.type === 'kart') {
+      // Draw kart sprite
+      const sz = s.size;
+      ctx.fillStyle = s.color;
+      ctx.fillRect(s.screenX - sz/2, s.screenY - sz, sz, sz * 0.7);
+      // Wheels
+      ctx.fillStyle = '#333';
+      ctx.fillRect(s.screenX - sz/2 - 2, s.screenY - sz*0.3, sz*0.25, sz*0.3);
+      ctx.fillRect(s.screenX + sz/4, s.screenY - sz*0.3, sz*0.25, sz*0.3);
+      // Head
+      ctx.fillStyle = '#fda';
+      ctx.beginPath();
+      ctx.arc(s.screenX, s.screenY - sz, sz*0.3, 0, Math.PI*2);
+      ctx.fill();
+    } else if (s.type === 'item') {
+      // Item box - rotating question mark
+      const sz = s.size;
+      ctx.fillStyle = '#ff0';
+      ctx.strokeStyle = '#f80';
+      ctx.lineWidth = 2;
+      ctx.fillRect(s.screenX - sz/2, s.screenY - sz, sz, sz);
+      ctx.strokeRect(s.screenX - sz/2, s.screenY - sz, sz, sz);
+      ctx.fillStyle = '#f00';
+      ctx.font = `bold ${sz*0.7}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.fillText('?', s.screenX, s.screenY - sz*0.3);
+    } else if (s.type === 'banana') {
+      const sz = s.size;
+      ctx.font = `${sz}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.fillText('🍌', s.screenX, s.screenY - sz/2);
+    }
+  });
+  
+  // Draw player kart
+  drawPlayerKart();
+  
+  // Countdown overlay
+  if (gameState === 'countdown') {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = countdownNum > 0 ? '#ff0' : '#0f0';
+    ctx.font = 'bold 120px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(countdownNum > 0 ? countdownNum : 'GO!', W/2, H/2 + 40);
+  }
+  
+  // Finish overlay
+  if (gameState === 'finish') {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ff0';
+    ctx.font = 'bold 48px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText('🏁 FINISH! 🏁', W/2, H/2 - 40);
+    
+    const positions = getPositions();
+    const pos = positions.indexOf('player') + 1;
+    const suffix = ['st','nd','rd','th','th','th','th','th'][pos-1];
+    ctx.fillStyle = pos === 1 ? '#ffd700' : '#fff';
+    ctx.font = 'bold 36px Courier New';
+    ctx.fillText(`${pos}${suffix} Place!`, W/2, H/2 + 20);
+    
+    ctx.fillStyle = '#aaa';
+    ctx.font = '20px Courier New';
+    ctx.fillText(`Time: ${formatTime(player.finishTime)}`, W/2, H/2 + 60);
+    ctx.fillText('Press ENTER to restart', W/2, H/2 + 100);
+  }
+  
+  // Draw minimap
+  drawMinimap();
+}
+
+function drawClouds() {
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  const t = Date.now() / 5000;
+  for (let i = 0; i < 5; i++) {
+    const cx = ((i * 130 + t * 20) % (W + 100)) - 50;
+    const cy = 30 + i * 15;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, 40, 15, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx + 25, cy - 5, 30, 12, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function drawPlayerKart() {
+  const cx = W / 2;
+  const cy = H - 50;
+  const sz = 40;
+  
+  ctx.save();
+  ctx.translate(cx, cy);
+  
+  // Spin animation
+  if (player.spinTimer > 0) {
+    ctx.rotate(player.angle);
+  } else {
+    ctx.rotate(player.angle * 0.3);
+  }
+  
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.ellipse(0, 10, sz/2, 8, 0, 0, Math.PI*2);
+  ctx.fill();
+  
+  // Kart body
+  ctx.fillStyle = '#e22';
+  ctx.beginPath();
+  ctx.roundRect(-sz/2, -sz/2, sz, sz*0.6, 4);
+  ctx.fill();
+  
+  // Cockpit
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-sz/4, -sz/2 - 4, sz/2, sz/4);
+  
+  // Wheels
+  ctx.fillStyle = '#222';
+  ctx.fillRect(-sz/2 - 4, -sz/4, 8, sz/3);
+  ctx.fillRect(sz/2 - 4, -sz/4, 8, sz/3);
+  ctx.fillRect(-sz/2 - 4, sz/6, 8, sz/3);
+  ctx.fillRect(sz/2 - 4, sz/6, 8, sz/3);
+  
+  // Driver head
+  ctx.fillStyle = '#fda';
+  ctx.beginPath();
+  ctx.arc(0, -sz/2 - 8, 8, 0, Math.PI*2);
+  ctx.fill();
+  
+  // Helmet
+  ctx.fillStyle = '#e22';
+  ctx.beginPath();
+  ctx.arc(0, -sz/2 - 10, 8, Math.PI, 0);
+  ctx.fill();
+  
+  // Boost flame
+  if (player.boostTimer > 0) {
+    ctx.fillStyle = `hsl(${Math.random()*60}, 100%, 60%)`;
+    ctx.beginPath();
+    ctx.moveTo(-8, sz/3);
+    ctx.lineTo(8, sz/3);
+    ctx.lineTo(0, sz/3 + 15 + Math.random()*10);
+    ctx.fill();
+  }
+  
+  ctx.restore();
+}
+
+function drawMinimap() {
+  miniCtx.fillStyle = '#1a1a2e';
+  miniCtx.fillRect(0, 0, 120, 120);
+  
+  const scale = 0.12;
+  const ox = 10, oy = 10;
+  
+  // Draw track
+  miniCtx.strokeStyle = '#555';
+  miniCtx.lineWidth = 4;
+  miniCtx.beginPath();
+  trackPath.forEach((p, i) => {
+    const sx = p.x * scale + ox;
+    const sy = p.y * scale + oy;
+    if (i === 0) miniCtx.moveTo(sx, sy);
+    else miniCtx.lineTo(sx, sy);
+  });
+  miniCtx.closePath();
+  miniCtx.stroke();
+  
+  // Draw AI
+  aiRacers.forEach(ai => {
+    const wp = getRacerWorldPos(ai.trackPos, ai.lateralOff);
+    miniCtx.fillStyle = ai.color;
+    miniCtx.fillRect(wp.x * scale + ox - 2, wp.y * scale + oy - 2, 4, 4);
+  });
+  
+  // Draw player
+  const pw = getRacerWorldPos(player.trackPos, player.lateralOff);
+  miniCtx.fillStyle = '#fff';
+  miniCtx.fillRect(pw.x * scale + ox - 3, pw.y * scale + oy - 3, 6, 6);
+}
+
+function formatTime(t) {
+  const mins = Math.floor(t / 60);
+  const secs = Math.floor(t % 60);
+  const ms = Math.floor((t % 1) * 100);
+  return `${mins}:${secs.toString().padStart(2,'0')}.${ms.toString().padStart(2,'0')}`;
+}
+
+// ============================================================
+// GAME LOOP
+// ============================================================
+
+let lastTime = 0;
+
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+  
+  // Start screen input
+  if (gameState === 'start' && keys['Enter']) {
+    startRace();
+    keys['Enter'] = false;
+  }
+  
+  // Restart
+  if (gameState === 'finish' && keys['Enter']) {
+    startRace();
+    keys['Enter'] = false;
+  }
+  
+  update(dt);
+  render();
+  
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
