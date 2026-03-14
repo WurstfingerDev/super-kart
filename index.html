@@ -851,12 +851,13 @@ function render() {
     const perspective = rowFromBottom / ROAD_H;
     if (perspective < 0.01) continue;
     const depth = 1.0 / perspective;
-    const scale = depth * 3;
 
     for (let screenX = 0; screenX < W; screenX += 1) {
       const relX = (screenX - W/2) / W;
-      const worldX = playerWorld.x + pInfo.dirX * depth * 80 + pInfo.normX * relX * scale * 40;
-      const worldY = playerWorld.y + pInfo.dirY * depth * 80 + pInfo.normY * relX * scale * 40;
+      const fwd = depth * 12;
+      const lat = relX * depth * 45;
+      const worldX = playerWorld.x + pInfo.dirX * fwd + pInfo.normX * lat;
+      const worldY = playerWorld.y + pInfo.dirY * fwd + pInfo.normY * lat;
 
       let onTrack = false, onCurb = false;
       let nearestDist = Infinity;
@@ -892,7 +893,7 @@ function render() {
       }
 
       // Depth fog
-      const fog = Math.min(depth * 0.015, 0.6);
+      const fog = Math.min(depth * 0.08, 0.6);
       r = Math.floor(r * (1-fog));
       g = Math.floor(g * (1-fog));
       b = Math.floor(b * (1-fog));
@@ -916,7 +917,8 @@ function render() {
   });
   aiRacers.forEach(ai => {
     const wp = getRacerWorldPos(ai.trackPos, ai.lateralOff);
-    sprites.push({type:'kart', x:wp.x, y:wp.y, color:ai.color});
+    const aiInfo = getTrackInfo(ai.trackPos);
+    sprites.push({type:'kart', x:wp.x, y:wp.y, color:ai.color, dirX:aiInfo.dirX, dirY:aiInfo.dirY, lateralOff:ai.lateralOff, prevLateral:ai.targetLateral||0});
   });
 
   sprites.forEach(s => {
@@ -924,12 +926,12 @@ function render() {
     s.dist = Math.sqrt(dx*dx + dy*dy);
     const relDir = dx * pInfo.dirX + dy * pInfo.dirY;
     const relNorm = dx * pInfo.normX + dy * pInfo.normY;
-    if (relDir > 2) {
-      const ps = 80 / relDir;
-      s.screenX = W/2 + relNorm * ps * 3;
-      s.screenY = H - ROAD_H + ROAD_H * ps * 0.3;
+    if (relDir > 1) {
+      const ps = 12 / relDir;
+      s.screenX = W/2 + relNorm * ps * (W/2);
+      s.screenY = horizonY + (H - horizonY) * (1 - ps);
       s.size = Math.max(4, 30 * ps);
-      s.visible = true;
+      s.visible = s.screenY > horizonY && s.screenY < H;
     } else s.visible = false;
   });
 
@@ -938,13 +940,22 @@ function render() {
     if (!s.visible) return;
     const sz = s.size;
     if (s.type === 'kart') {
+      // Calculate visual rotation based on AI's relative angle to player
+      ctx.save();
+      ctx.translate(s.screenX, s.screenY - sz/2);
+      // Rotate based on difference between AI direction and player view direction
+      const aiAngle = Math.atan2(s.dirY, s.dirX);
+      const playerAngle = Math.atan2(pInfo.dirY, pInfo.dirX);
+      const relAngle = aiAngle - playerAngle;
+      ctx.rotate(relAngle);
       ctx.fillStyle = s.color;
-      ctx.fillRect(s.screenX-sz/2, s.screenY-sz, sz, sz*0.7);
+      ctx.fillRect(-sz/2, -sz*0.35, sz, sz*0.7);
       ctx.fillStyle = '#333';
-      ctx.fillRect(s.screenX-sz/2-2, s.screenY-sz*0.3, sz*0.25, sz*0.3);
-      ctx.fillRect(s.screenX+sz/4, s.screenY-sz*0.3, sz*0.25, sz*0.3);
+      ctx.fillRect(-sz/2-2, -sz*0.15, sz*0.2, sz*0.3);
+      ctx.fillRect(sz/2-sz*0.2+2, -sz*0.15, sz*0.2, sz*0.3);
       ctx.fillStyle = '#fda';
-      ctx.beginPath(); ctx.arc(s.screenX, s.screenY-sz, sz*0.3, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, -sz*0.35, sz*0.25, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
     } else if (s.type === 'item') {
       const bob = Math.sin(Date.now()/200) * 3;
       ctx.fillStyle = '#ff0'; ctx.strokeStyle = '#f80'; ctx.lineWidth = 2;
